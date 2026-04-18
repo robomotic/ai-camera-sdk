@@ -1,6 +1,7 @@
 # AI Camera SDK — REST API Specification
 
-> 📷 🛡️ Local HTTPS control plane for the AI Camera SDK embedded vision system.
+> 📷 🛡️ Local HTTPS control plane for the AI Camera SDK embedded vision system.  
+> 🔐 **Protected by [SeLink](https://www.selink.blu5group.com/)** — Zero Trust remote access tunnel.
 > Configures pipelines, detectors, masks, outputs, calibration, power
 > management, firmware updates, remote tunnels, and commercial licensing.
 > Media capture and delivery (GStreamer, DeepStream, NVIDIA shared memory)
