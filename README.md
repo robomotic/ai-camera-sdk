@@ -395,12 +395,12 @@ installed without a full reboot.
 
 ```mermaid
 graph LR
-    A["GET /updates/available"] --> B{"Security\nupdates?"]
+    A["GET /updates/available"] --> B{"Security\nupdates?"}
     B -->|yes, no reboot| C["POST /updates/{id}:install\njob queued"]
     B -->|yes, reboot required| D["POST /updates/{id}:install"]
     D --> E["POST /system/reboot\nactivates new slot"]
     C --> F["GET /updates/jobs/{job_id}\nprogress"]
-    F --> G["Job = success?"]
+    F --> G{"Job = success?"}
     G -->|no| H["POST /updates/rollback"]
     G -->|yes| I["Running new version"]
 ```
