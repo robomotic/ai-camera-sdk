@@ -2794,7 +2794,7 @@ components:
         $ref: '#/components/schemas/Point'
     HardwarePlatform:
       type: string
-      enum: [jetson-nano, ambarella, rpi-hailo]
+      enum: [jetson-nano, jetson-orin-nano, agx-orin, ambarella, rpi-hailo]
     Resource:
       type: object
       description: Base fields present on all concrete resources.
@@ -2976,6 +2976,10 @@ components:
     SystemInfo:
       type: object
       required: [model, platform, firmware_version, serial, uptime_seconds, hostname]
+      description: |
+        Supported platforms: `jetson-nano`, `jetson-orin-nano`, `agx-orin`,
+        `ambarella`, `rpi-hailo`. Detector availability varies per platform;
+        see `GET /detectors/models` for the per-model catalogue.
       properties:
         model: { type: string }
         platform: { $ref: '#/components/schemas/HardwarePlatform' }

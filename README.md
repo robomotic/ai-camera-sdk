@@ -21,6 +21,16 @@ is a valid target for the control API:
 Full NVIDIA accelerator stack: DeepStream, TensorRT, cuDNN.
 Supports all three detector types (`face`, `license_plate`, `document`).
 
+### NVIDIA AGX Orin
+
+![NVIDIA AGX Orin — multi-camera system](images/nvidia-agx-orin.jpg)
+
+Compact embedded AI computer with a high-performance NVIDIA Ampere-architecture
+GPU. Designed for autonomous machines and multi-camera vision applications.
+Full accelerator stack; supports all three detector types (`face`,
+`license_plate`, `document`). Multiple CSI camera inputs allow simultaneous
+multi-stream pipeline processing.
+
 ### Raspberry Pi 5 + HAILO
 
 ![Raspberry Pi 5 — internals](images/rpi5-inside.webp)
@@ -52,6 +62,10 @@ The HAILO chip runs inference; supported detectors are `face` and
 │   ├── 08_get_stats.sh
 │   └── 09_apply_license.sh
 └── images/                   # Hardware board photography
+    ├── jetson-orin-nano-01.jpg
+    ├── jetson-orin-nano-02.png
+    ├── nvidia-agx-orin.jpg
+    └── rpi5-inside.webp
 ```
 
 ---
