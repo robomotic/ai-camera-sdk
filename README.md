@@ -1,10 +1,26 @@
 # AI Camera SDK — REST API Specification
 
-Local HTTPS control plane for the AI Camera SDK embedded vision system.
-Configures pipelines, detectors, masks, outputs, calibration, power
-management, firmware updates, remote tunnels, and commercial licensing.
-Media capture and delivery (GStreamer, DeepStream, NVIDIA shared memory)
-are handled outside this API.
+> 📷 🛡️ Local HTTPS control plane for the AI Camera SDK embedded vision system.
+> Configures pipelines, detectors, masks, outputs, calibration, power
+> management, firmware updates, remote tunnels, and commercial licensing.
+> Media capture and delivery (GStreamer, DeepStream, NVIDIA shared memory)
+> are handled outside this API.
+
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI-3.1-blue?logo=openapiinitiative)](https://www.openapis.org/)
+[![Spec license: CC BY 4.0](https://img.shields.io/badge/spec%20license-CC%20BY%204.0-ff69b4)](https://creativecommons.org/licenses/by/4.0/)
+[![Portal license: AGPL 3.0](https://img.shields.io/badge/portal%20license-AGPL%203.0-green?logo=gnu)](https://www.gnu.org/licenses/agpl-3.0.en.html)
+[![Spectral lint: 0 errors](https://img.shields.io/badge/spectral-0%20errors-brightgreen)](https://meta.stoplight.io/docs/spectral/README.md)
+[![JSON: RFC 7807](https://img.shields.io/badge/JSON-RFC%207807-cyan?logo=json)](https://datatracker.ietf.org/doc/html/rfc7807)
+
+| 🏷️ Tag | 📋 Contents |
+|---|---|
+| [Hardware targets](#hardware-targets) | Jetson Orin Nano · AGX Orin · RPi 5 + HAILO |
+| [Workflow guide](#workflow-guide) | 10-step onboarding with Mermaid diagrams |
+| [Resource overview](#resource-overview) | All endpoints at a glance |
+| [Key design decisions](#key-design-decisions) | RFC 7807 · pagination · ETag · RBAC |
+| [docs/API-DESIGN.md](docs/API-DESIGN.md) | Full design rationale |
+| [docs/LICENSING.md](docs/LICENSING.md) | Three-tier licensing explained |
+| [examples/](examples/) | Ready-to-run curl scripts |
 
 ---
 
