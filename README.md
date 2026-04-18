@@ -262,7 +262,7 @@ profile to a pipeline so frames are undistorted before detection.
 graph LR
     A["POST /calibrations\ncreate profile"] --> B["POST /calibrations/{id}/images\nupload ≥ 10 checkerboard frames"]
     B --> C["POST /calibrations/{id}:compute\nsolve K matrix + distortion"]
-    C --> D{"RMS error\nacceptable?"]
+    C --> D{"RMS error\nacceptable?"}
     D -->|yes| E["POST /calibrations/{id}:apply\nbind to pipeline"]
     D -->|no| F["Upload more images\nretry compute"]
 ```
