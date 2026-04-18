@@ -1,0 +1,3806 @@
+openapi: 3.1.0
+info:
+  title: AI Camera SDK Control API
+  version: 1.0.0
+  summary: Local control-plane REST API for the AI Camera SDK board.
+  description: |
+    The AI Camera SDK Control API is the HTTPS control plane exposed by the
+    `ai-camera-sdk` board. It configures, monitors, and administers the
+    device but does **not** carry media: capture, processing and delivery
+    are performed by GStreamer / DeepStream / NVIDIA shared memory.
+
+    Supported hardware platforms (detector availability varies):
+
+      * NVIDIA Jetson Nano
+      * Ambarella CV-series SoCs
+      * Raspberry Pi with HAILO accelerator
+
+    This document (`openapi.yaml`) is licensed under **CC-BY-4.0** so that
+    third parties can generate and distribute compatible clients without
+    inheriting the web portal's AGPL-3.0 obligations. The reference web
+    portal that consumes this API is licensed AGPL-3.0-only. Firmware and
+    on-device services remain proprietary and are covered by a separate
+    commercial EULA. See `docs/LICENSING.md` for the full rationale.
+  contact:
+    name: AI Camera SDK Maintainers
+    url: https://github.com/robomotic/ai-camera-sdk
+  license:
+    name: CC-BY-4.0
+    identifier: CC-BY-4.0
+  termsOfService: https://docs.ai-camera-sdk.io/terms
+
+servers:
+  - url: https://{board}/api/v1
+    description: On-device control plane (HTTPS, self-signed by default).
+    variables:
+      board:
+        default: camera.local
+        description: Hostname or IP address of the AI Camera SDK board.
+
+tags:
+  - name: System
+    description: Device information, health, time, network, lifecycle.
+  - name: Auth
+    description: Login, token refresh, password change, API keys.
+  - name: Users
+    description: User account management.
+  - name: Roles
+    description: Built-in and custom RBAC roles.
+  - name: Inputs
+    description: Capture source registration (descriptive only).
+  - name: Pipelines
+    description: Processing graph lifecycle and configuration.
+  - name: Detectors
+    description: Per-pipeline detector configuration (face, plate, document).
+  - name: Calibration
+    description: Lens intrinsics and distortion correction.
+  - name: Masks
+    description: Privacy masks applied post-detection.
+  - name: Outputs
+    description: Per-pipeline output fan-out (RTSP, UDP, HDMI, shm, file).
+  - name: Power
+    description: Power metrics, policy and schedules.
+  - name: Stats
+    description: Counters, time-series and export.
+  - name: Updates
+    description: Firmware/security updates with A/B rollback.
+  - name: Tunnels
+    description: Remote-access tunnels (e.g. SeLink).
+  - name: License
+    description: Commercial license key management.
+  - name: Events
+    description: Historical events and realtime WebSocket channel.
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+paths:
+  # ===================================================================
+  # Unauthenticated health probes
+  # ===================================================================
+  /healthz:
+    get:
+      operationId: getLiveness
+      summary: Liveness probe
+      description: Returns 200 if the control plane process is alive. Unauthenticated.
+      tags: [System]
+      security: []
+      x-required-scopes: []
+      responses:
+        '200':
+          description: Alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Readiness probe
+      description: Returns 200 when the device is ready to serve requests. Unauthenticated.
+      tags: [System]
+      security: []
+      x-required-scopes: []
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ready] }
+                  subsystems:
+                    type: array
+                    items: { type: string }
+        '503':
+          description: Not ready.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ===================================================================
+  # Auth
+  # ===================================================================
+  /auth/login:
+    post:
+      operationId: login
+      summary: Exchange credentials for a JWT access + refresh pair.
+      tags: [Auth]
+      security: []
+      x-required-scopes: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      summary: Exchange a refresh token for a new access token.
+      tags: [Auth]
+      security: []
+      x-required-scopes: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Rotated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the current refresh token.
+      tags: [Auth]
+      x-required-scopes: []
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /auth/password:
+    post:
+      operationId: changeOwnPassword
+      summary: Change the authenticated user's password.
+      tags: [Auth]
+      x-required-scopes: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasswordChangeRequest' }
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /auth/api-keys:
+    get:
+      operationId: listApiKeys
+      summary: List API keys the caller is allowed to see.
+      tags: [Auth]
+      x-required-scopes: [api_keys:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Page of API keys.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/ApiKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: createApiKey
+      summary: Create an API key. Secret is returned once.
+      tags: [Auth]
+      x-required-scopes: [api_keys:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApiKeyCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /auth/api-keys/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ApiKeyId'
+    get:
+      operationId: getApiKey
+      summary: Get API key metadata (never the secret).
+      tags: [Auth]
+      x-required-scopes: [api_keys:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke an API key.
+      tags: [Auth]
+      x-required-scopes: [api_keys:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /me:
+    get:
+      operationId: getMe
+      summary: Get the authenticated user's profile and effective scopes.
+      tags: [Users]
+      x-required-scopes: []
+      responses:
+        '200':
+          description: Current user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ===================================================================
+  # Users
+  # ===================================================================
+  /users:
+    get:
+      operationId: listUsers
+      summary: List users.
+      tags: [Users]
+      x-required-scopes: [users:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Filter'
+      responses:
+        '200':
+          description: Page of users.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createUser
+      summary: Create a user.
+      tags: [Users]
+      x-required-scopes: [users:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      operationId: getUser
+      summary: Get a user by id.
+      tags: [Users]
+      x-required-scopes: [users:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateUser
+      summary: Update a user.
+      tags: [Users]
+      x-required-scopes: [users:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deleteUser
+      summary: Delete a user.
+      tags: [Users]
+      x-required-scopes: [users:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /users/{id}:reset-password:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      operationId: resetUserPassword
+      summary: Admin issues a temporary password for the user.
+      tags: [Users]
+      x-required-scopes: [users:admin]
+      responses:
+        '200':
+          description: Temporary password issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [temporary_password, expires_at]
+                properties:
+                  temporary_password: { type: string, format: password }
+                  expires_at: { $ref: '#/components/schemas/Timestamp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{id}:lock:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      operationId: lockUser
+      summary: Lock a user account.
+      tags: [Users]
+      x-required-scopes: [users:admin]
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{id}:unlock:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      operationId: unlockUser
+      summary: Unlock a user account.
+      tags: [Users]
+      x-required-scopes: [users:admin]
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ===================================================================
+  # Roles
+  # ===================================================================
+  /roles:
+    get:
+      operationId: listRoles
+      summary: List built-in and custom roles.
+      tags: [Roles]
+      x-required-scopes: [roles:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Roles.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Role' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createRole
+      summary: Create a custom role.
+      tags: [Roles]
+      x-required-scopes: [roles:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoleCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /roles/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RoleId'
+    get:
+      operationId: getRole
+      summary: Get a role.
+      tags: [Roles]
+      x-required-scopes: [roles:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateRole
+      summary: Update a custom role.
+      tags: [Roles]
+      x-required-scopes: [roles:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoleCreate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Role' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deleteRole
+      summary: Delete a custom role (built-in roles cannot be deleted).
+      tags: [Roles]
+      x-required-scopes: [roles:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /audit-log:
+    get:
+      operationId: listAuditLog
+      summary: Security-relevant audit events.
+      tags: [Users]
+      x-required-scopes: [audit:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: from
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: to
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: actor
+          in: query
+          required: false
+          schema: { type: string }
+        - name: action
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Page of audit events.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AuditEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ===================================================================
+  # System
+  # ===================================================================
+  /system/info:
+    get:
+      operationId: getSystemInfo
+      summary: Device model, platform, firmware, serial.
+      tags: [System]
+      x-required-scopes: [system:read]
+      responses:
+        '200':
+          description: System info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /system/health:
+    get:
+      operationId: getSystemHealth
+      summary: Subsystem health rollup (authenticated, richer than /healthz).
+      tags: [System]
+      x-required-scopes: [system:read]
+      responses:
+        '200':
+          description: Health.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /system/reboot:
+    post:
+      operationId: rebootSystem
+      summary: Reboot the device.
+      tags: [System]
+      x-required-scopes: [system:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Reboot scheduled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scheduled_at: { $ref: '#/components/schemas/Timestamp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /system/shutdown:
+    post:
+      operationId: shutdownSystem
+      summary: Shut down the device.
+      tags: [System]
+      x-required-scopes: [system:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Shutdown scheduled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scheduled_at: { $ref: '#/components/schemas/Timestamp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /system/time:
+    get:
+      operationId: getSystemTime
+      summary: Get system time and NTP configuration.
+      tags: [System]
+      x-required-scopes: [system:read]
+      responses:
+        '200':
+          description: Time.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemTime' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      operationId: updateSystemTime
+      summary: Update NTP or set manual time.
+      tags: [System]
+      x-required-scopes: [system:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SystemTimeUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemTime' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /system/network:
+    get:
+      operationId: getNetworkConfig
+      summary: Get hostname, interfaces and DNS.
+      tags: [System]
+      x-required-scopes: [system:read]
+      responses:
+        '200':
+          description: Network config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetworkConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      operationId: updateNetworkConfig
+      summary: Update hostname / DNS (interface addressing is read-only).
+      tags: [System]
+      x-required-scopes: [system:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NetworkConfigUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetworkConfig' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  # ===================================================================
+  # Inputs
+  # ===================================================================
+  /inputs:
+    get:
+      operationId: listInputs
+      summary: List registered capture inputs.
+      tags: [Inputs]
+      x-required-scopes: [inputs:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Filter'
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Input' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createInput
+      summary: Register an input source.
+      tags: [Inputs]
+      x-required-scopes: [inputs:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InputCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Input' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /inputs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/InputId'
+    get:
+      operationId: getInput
+      summary: Get an input.
+      tags: [Inputs]
+      x-required-scopes: [inputs:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Input' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateInput
+      summary: Update an input.
+      tags: [Inputs]
+      x-required-scopes: [inputs:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InputUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Input' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deleteInput
+      summary: Delete an input (fails if referenced by a pipeline).
+      tags: [Inputs]
+      x-required-scopes: [inputs:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /inputs/{id}:probe:
+    parameters:
+      - $ref: '#/components/parameters/InputId'
+    post:
+      operationId: probeInput
+      summary: Probe an input and return detected capabilities.
+      tags: [Inputs]
+      x-required-scopes: [inputs:read]
+      responses:
+        '200':
+          description: Probe result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InputProbe' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ===================================================================
+  # Pipelines
+  # ===================================================================
+  /pipelines:
+    get:
+      operationId: listPipelines
+      summary: List pipelines.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Filter'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Pipeline' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createPipeline
+      summary: Create a pipeline.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PipelineCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pipeline' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /pipelines/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    get:
+      operationId: getPipeline
+      summary: Get a pipeline.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pipeline' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updatePipeline
+      summary: Update a pipeline.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PipelineUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pipeline' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deletePipeline
+      summary: Delete a pipeline (must be stopped).
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /pipelines/{id}:start:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    post:
+      operationId: startPipeline
+      summary: Start a pipeline.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:operate]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Start accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PipelineStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /pipelines/{id}:stop:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    post:
+      operationId: stopPipeline
+      summary: Stop a pipeline.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:operate]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Stop accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PipelineStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /pipelines/{id}:restart:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    post:
+      operationId: restartPipeline
+      summary: Restart a pipeline.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:operate]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Restart accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PipelineStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /pipelines/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    get:
+      operationId: getPipelineStatus
+      summary: Live pipeline status.
+      tags: [Pipelines]
+      x-required-scopes: [pipelines:read]
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PipelineStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ===================================================================
+  # Detectors
+  # ===================================================================
+  /detectors/models:
+    get:
+      operationId: listDetectorModels
+      summary: Global catalogue of detector models and hardware support.
+      tags: [Detectors]
+      x-required-scopes: [detectors:read]
+      responses:
+        '200':
+          description: Catalogue.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/DetectorModel' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /pipelines/{id}/detectors:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    get:
+      operationId: listPipelineDetectors
+      summary: List detectors on a pipeline with their state.
+      tags: [Detectors]
+      x-required-scopes: [detectors:read]
+      responses:
+        '200':
+          description: Detector summaries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/DetectorSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /pipelines/{id}/detectors/{type}:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+      - $ref: '#/components/parameters/DetectorType'
+    get:
+      operationId: getPipelineDetector
+      summary: Get detector configuration.
+      tags: [Detectors]
+      x-required-scopes: [detectors:read]
+      responses:
+        '200':
+          description: Detector config.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DetectorConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Detector unavailable on this hardware platform.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    put:
+      operationId: setPipelineDetector
+      summary: Set detector configuration (full replace).
+      tags: [Detectors]
+      x-required-scopes: [detectors:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DetectorConfig' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DetectorConfig' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Detector unavailable on this hardware platform.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  # ===================================================================
+  # Calibration
+  # ===================================================================
+  /calibrations:
+    get:
+      operationId: listCalibrations
+      summary: List calibration profiles.
+      tags: [Calibration]
+      x-required-scopes: [calibration:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Calibration' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createCalibration
+      summary: Create a calibration profile.
+      tags: [Calibration]
+      x-required-scopes: [calibration:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CalibrationCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Calibration' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /calibrations/{id}:
+    parameters:
+      - $ref: '#/components/parameters/CalibrationId'
+    get:
+      operationId: getCalibration
+      summary: Get a calibration profile.
+      tags: [Calibration]
+      x-required-scopes: [calibration:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Calibration' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateCalibration
+      summary: Update a calibration profile.
+      tags: [Calibration]
+      x-required-scopes: [calibration:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CalibrationUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Calibration' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deleteCalibration
+      summary: Delete a calibration profile.
+      tags: [Calibration]
+      x-required-scopes: [calibration:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /calibrations/{id}/images:
+    parameters:
+      - $ref: '#/components/parameters/CalibrationId'
+    post:
+      operationId: uploadCalibrationImage
+      summary: Upload a checkerboard / ChArUco image.
+      tags: [Calibration]
+      x-required-scopes: [calibration:write]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                label:
+                  type: string
+                  description: Optional label for the capture.
+      responses:
+        '201':
+          description: Image accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [image_id, image_count]
+                properties:
+                  image_id: { $ref: '#/components/schemas/Id' }
+                  image_count: { type: integer }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413':
+          description: Image too large.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /calibrations/{id}:compute:
+    parameters:
+      - $ref: '#/components/parameters/CalibrationId'
+    post:
+      operationId: computeCalibration
+      summary: Solve intrinsics and distortion from uploaded images.
+      tags: [Calibration]
+      x-required-scopes: [calibration:write]
+      responses:
+        '200':
+          description: Computed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Calibration' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /calibrations/{id}:apply:
+    parameters:
+      - $ref: '#/components/parameters/CalibrationId'
+    post:
+      operationId: applyCalibration
+      summary: Apply a calibration profile to a pipeline.
+      tags: [Calibration]
+      x-required-scopes: [calibration:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CalibrationApplyRequest' }
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ===================================================================
+  # Masks
+  # ===================================================================
+  /pipelines/{id}/masks:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    get:
+      operationId: listPipelineMasks
+      summary: List masks on a pipeline.
+      tags: [Masks]
+      x-required-scopes: [masks:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Mask' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: createPipelineMask
+      summary: Create a mask.
+      tags: [Masks]
+      x-required-scopes: [masks:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MaskCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Mask' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /pipelines/{id}/masks/{mask_id}:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+      - $ref: '#/components/parameters/MaskId'
+    get:
+      operationId: getPipelineMask
+      summary: Get a mask.
+      tags: [Masks]
+      x-required-scopes: [masks:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Mask' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updatePipelineMask
+      summary: Update a mask.
+      tags: [Masks]
+      x-required-scopes: [masks:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MaskUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Mask' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deletePipelineMask
+      summary: Delete a mask.
+      tags: [Masks]
+      x-required-scopes: [masks:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  # ===================================================================
+  # Outputs
+  # ===================================================================
+  /pipelines/{id}/outputs:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    get:
+      operationId: listPipelineOutputs
+      summary: List outputs on a pipeline.
+      tags: [Outputs]
+      x-required-scopes: [outputs:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Output' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: createPipelineOutput
+      summary: Create an output.
+      tags: [Outputs]
+      x-required-scopes: [outputs:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OutputCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Output' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /pipelines/{id}/outputs/{out_id}:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+      - $ref: '#/components/parameters/OutputId'
+    get:
+      operationId: getPipelineOutput
+      summary: Get an output.
+      tags: [Outputs]
+      x-required-scopes: [outputs:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Output' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updatePipelineOutput
+      summary: Update an output.
+      tags: [Outputs]
+      x-required-scopes: [outputs:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OutputUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Output' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deletePipelineOutput
+      summary: Delete an output.
+      tags: [Outputs]
+      x-required-scopes: [outputs:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  # ===================================================================
+  # Power
+  # ===================================================================
+  /power/metrics:
+    get:
+      operationId: getPowerMetrics
+      summary: Current power and thermal metrics.
+      tags: [Power]
+      x-required-scopes: [power:read]
+      responses:
+        '200':
+          description: Metrics.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PowerMetrics' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /power/history:
+    get:
+      operationId: getPowerHistory
+      summary: Power time-series.
+      tags: [Power]
+      x-required-scopes: [power:read]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: to
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: step
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            description: Aggregation step in seconds.
+      responses:
+        '200':
+          description: Series.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [points]
+                properties:
+                  points:
+                    type: array
+                    items: { $ref: '#/components/schemas/PowerSeriesPoint' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /power/policy:
+    get:
+      operationId: getPowerPolicy
+      summary: Current power policy.
+      tags: [Power]
+      x-required-scopes: [power:read]
+      responses:
+        '200':
+          description: Policy.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PowerPolicy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      operationId: updatePowerPolicy
+      summary: Update power policy.
+      tags: [Power]
+      x-required-scopes: [power:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PowerPolicy' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PowerPolicy' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /power/schedules:
+    get:
+      operationId: listPowerSchedules
+      summary: List power schedules.
+      tags: [Power]
+      x-required-scopes: [power:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/PowerSchedule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createPowerSchedule
+      summary: Create a power schedule.
+      tags: [Power]
+      x-required-scopes: [power:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PowerScheduleCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PowerSchedule' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /power/schedules/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ScheduleId'
+    get:
+      operationId: getPowerSchedule
+      summary: Get a power schedule.
+      tags: [Power]
+      x-required-scopes: [power:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PowerSchedule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updatePowerSchedule
+      summary: Update a power schedule.
+      tags: [Power]
+      x-required-scopes: [power:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PowerScheduleCreate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PowerSchedule' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deletePowerSchedule
+      summary: Delete a power schedule.
+      tags: [Power]
+      x-required-scopes: [power:write]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  # ===================================================================
+  # Stats
+  # ===================================================================
+  /stats/summary:
+    get:
+      operationId: getStatsSummary
+      summary: Summary counters (since boot and lifetime).
+      tags: [Stats]
+      x-required-scopes: [stats:read]
+      responses:
+        '200':
+          description: Summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatsSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /stats/pipelines/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PipelineId'
+    get:
+      operationId: getPipelineStats
+      summary: Per-pipeline counters.
+      tags: [Stats]
+      x-required-scopes: [stats:read]
+      responses:
+        '200':
+          description: Counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatsCounters' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stats/detectors/{type}:
+    parameters:
+      - $ref: '#/components/parameters/DetectorType'
+    get:
+      operationId: getDetectorStats
+      summary: Per-detector counters aggregated across pipelines.
+      tags: [Stats]
+      x-required-scopes: [stats:read]
+      responses:
+        '200':
+          description: Counters.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, detections]
+                properties:
+                  type: { type: string }
+                  detections: { type: integer, minimum: 0 }
+                  unique_tracked: { type: integer, minimum: 0 }
+                  avg_confidence: { type: number }
+                  avg_latency_ms: { type: number }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stats/timeseries:
+    get:
+      operationId: getStatsTimeseries
+      summary: Historical time-series for a named metric.
+      tags: [Stats]
+      x-required-scopes: [stats:read]
+      parameters:
+        - name: metric
+          in: query
+          required: true
+          schema: { type: string }
+        - name: from
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: to
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: step
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Series.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatsTimeseries' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /stats/export:
+    get:
+      operationId: exportStats
+      summary: Export stats in CSV, JSON or Prometheus exposition format.
+      tags: [Stats]
+      x-required-scopes: [stats:read]
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, json, prometheus]
+      responses:
+        '200':
+          description: Exported body.
+          content:
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+                description: Prometheus exposition format when `format=prometheus`.
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /stats:reset:
+    post:
+      operationId: resetStats
+      summary: Reset counters by namespace (admin only).
+      tags: [Stats]
+      x-required-scopes: [stats:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatsResetRequest' }
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ===================================================================
+  # Updates
+  # ===================================================================
+  /updates/status:
+    get:
+      operationId: getUpdateStatus
+      summary: Current version, channel, available and security counts.
+      tags: [Updates]
+      x-required-scopes: [updates:read]
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpdateStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /updates:check:
+    post:
+      operationId: checkUpdates
+      summary: Force a check for new updates.
+      tags: [Updates]
+      x-required-scopes: [updates:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Updated status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpdateStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /updates/available:
+    get:
+      operationId: listAvailableUpdates
+      summary: List updates available to install.
+      tags: [Updates]
+      x-required-scopes: [updates:read]
+      responses:
+        '200':
+          description: List.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/UpdateInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /updates/{id}:install:
+    parameters:
+      - $ref: '#/components/parameters/UpdateId'
+    post:
+      operationId: installUpdate
+      summary: Queue an update install.
+      tags: [Updates]
+      x-required-scopes: [updates:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Job queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpdateJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /updates/jobs/{job_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    get:
+      operationId: getUpdateJob
+      summary: Get update job progress.
+      tags: [Updates]
+      x-required-scopes: [updates:read]
+      responses:
+        '200':
+          description: Job.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpdateJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /updates/channel:
+    post:
+      operationId: setUpdateChannel
+      summary: Set the update channel.
+      tags: [Updates]
+      x-required-scopes: [updates:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateChannelRequest' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpdateStatus' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /updates/rollback:
+    post:
+      operationId: rollbackUpdate
+      summary: Roll back to the previous A/B slot.
+      tags: [Updates]
+      x-required-scopes: [updates:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Rollback queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpdateJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ===================================================================
+  # Tunnels
+  # ===================================================================
+  /tunnels:
+    get:
+      operationId: listTunnels
+      summary: List configured tunnels.
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Tunnel' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createTunnel
+      summary: Create a tunnel configuration.
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TunnelCreate' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tunnel' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /tunnels/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TunnelId'
+    get:
+      operationId: getTunnel
+      summary: Get a tunnel configuration.
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:read]
+      responses:
+        '200':
+          description: Found.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tunnel' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateTunnel
+      summary: Update a tunnel.
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TunnelUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tunnel' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      operationId: deleteTunnel
+      summary: Delete a tunnel (must be disconnected).
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:admin]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /tunnels/{id}:connect:
+    parameters:
+      - $ref: '#/components/parameters/TunnelId'
+    post:
+      operationId: connectTunnel
+      summary: Connect a tunnel.
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:operate]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Connect accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TunnelStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tunnels/{id}:disconnect:
+    parameters:
+      - $ref: '#/components/parameters/TunnelId'
+    post:
+      operationId: disconnectTunnel
+      summary: Disconnect a tunnel.
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:operate]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Disconnect accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TunnelStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tunnels/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/TunnelId'
+    get:
+      operationId: getTunnelStatus
+      summary: Live tunnel status.
+      tags: [Tunnels]
+      x-required-scopes: [tunnels:read]
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TunnelStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ===================================================================
+  # License
+  # ===================================================================
+  /license:
+    get:
+      operationId: getLicense
+      summary: Current commercial license status.
+      tags: [License]
+      x-required-scopes: [license:read]
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: activateLicense
+      summary: Activate a license via key string or uploaded license file.
+      tags: [License]
+      x-required-scopes: [license:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LicenseActivateRequest' }
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Activated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseStatus' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: License invalid or not bound to this hardware.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      operationId: deactivateLicense
+      summary: Deactivate the current license.
+      tags: [License]
+      x-required-scopes: [license:admin]
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /license:refresh:
+    post:
+      operationId: refreshLicense
+      summary: Online license refresh (requires internet).
+      tags: [License]
+      x-required-scopes: [license:admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Refreshed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '502':
+          description: License server unreachable.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /license/features:
+    get:
+      operationId: getLicenseFeatures
+      summary: Feature flags derived from the active license.
+      tags: [License]
+      x-required-scopes: [license:read]
+      responses:
+        '200':
+          description: Features.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LicenseFeatures' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ===================================================================
+  # Events (historical). Realtime is documented via x-websocket.
+  # ===================================================================
+  /events:
+    get:
+      operationId: listEvents
+      summary: Historical events (paginated).
+      tags: [Events]
+      x-required-scopes: [events:read]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: from
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: to
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: types
+          in: query
+          required: false
+          description: Comma-separated list of channel names.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Event' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+# ---------------------------------------------------------------------------
+# Realtime WebSocket channel (not expressible in OpenAPI paths).
+# Documented here via the `x-websocket` vendor extension and fully in
+# docs/API-DESIGN.md. OpenAPI 3.1 `webhooks` is intentionally NOT used
+# because it targets server-initiated HTTP callbacks, not persistent sockets.
+# ---------------------------------------------------------------------------
+x-websocket:
+  url: wss://{board}/api/v1/ws
+  description: |
+    Authenticated realtime channel. Auth is provided either by a
+    `?access_token=<jwt>` query parameter or by the
+    `Sec-WebSocket-Protocol: bearer,<jwt>` sub-protocol header.
+
+    After connection the client subscribes with:
+
+        { "op": "subscribe", "channels": ["pipeline.status", "power.metrics"] }
+
+    The server pushes JSON frames of the shape:
+
+        { "channel": "pipeline.status", "ts": "2026-04-18T09:02:39Z", "data": { ... } }
+
+    Heartbeat: server sends ping every 20s; idle sockets are closed after 60s.
+  channels:
+    - name: pipeline.status
+      description: Pipeline state transitions, fps, backpressure, last error.
+    - name: power.metrics
+      description: Rolling power and thermal samples (1 Hz).
+    - name: detector.events
+      description: Detection-level events (faces, plates, documents).
+    - name: updates.jobs
+      description: Update job progress and completion.
+    - name: tunnels.status
+      description: Tunnel connection state transitions.
+    - name: system.health
+      description: Subsystem health changes.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT access token issued by `POST /auth/login`. Token claims include
+        `sub`, `roles`, `scope`, `exp`, `iat`, `jti`. Refresh via
+        `POST /auth/refresh`.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Long-lived machine credential, issued under `/auth/api-keys`.
+        The secret is shown once at creation and never returned again.
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor returned by a previous page as `next_cursor`.
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of items per page.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Sort:
+      name: sort
+      in: query
+      description: |
+        Sort order. Prefix with `-` for descending. Example: `-created_at`.
+      required: false
+      schema:
+        type: string
+    Filter:
+      name: filter
+      in: query
+      description: |
+        Deep-object filter parameters of the form `filter[field]=value`.
+      required: false
+      style: deepObject
+      explode: true
+      schema:
+        type: object
+        additionalProperties:
+          type: string
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        Optimistic-concurrency token echoing the last seen `ETag`. Requests
+        that fail the precondition return 412.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Client-generated key (UUID v4 or ULID recommended). Replays of the
+        same key within the idempotency window return the original response.
+      schema:
+        type: string
+        maxLength: 255
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Client correlation id; echoed back on the response.
+      schema:
+        type: string
+        maxLength: 128
+    PipelineId:
+      name: id
+      in: path
+      required: true
+      description: Pipeline ULID.
+      schema:
+        $ref: '#/components/schemas/Id'
+    DetectorType:
+      name: type
+      in: path
+      required: true
+      description: Detector type.
+      schema:
+        type: string
+        enum: [face, license_plate, document]
+    MaskId:
+      name: mask_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    OutputId:
+      name: out_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    RoleId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    InputId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    CalibrationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    TunnelId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    UpdateId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    ScheduleId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    ApiKeyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+
+  headers:
+    ETag:
+      description: Entity tag for optimistic concurrency.
+      schema:
+        type: string
+    RateLimitLimit:
+      description: Request quota for the current window.
+      schema:
+        type: integer
+    RateLimitRemaining:
+      description: Remaining requests in the current window.
+      schema:
+        type: integer
+    RateLimitReset:
+      description: Seconds until the current window resets.
+      schema:
+        type: integer
+    RetryAfter:
+      description: Seconds the client should wait before retrying.
+      schema:
+        type: integer
+    Location:
+      description: URL of the newly created resource.
+      schema:
+        type: string
+        format: uri
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            auth_required:
+              value:
+                type: https://docs.ai-camera-sdk.io/errors/auth-required
+                title: Authentication required
+                status: 401
+                code: AUTH_REQUIRED
+                detail: Missing or expired access token.
+                instance: /api/v1/pipelines
+                trace_id: 01HF8Z8W9Q4J7K5N2V3X6M1T0B
+    Forbidden:
+      description: Authenticated but lacks required scope.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Resource not found.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: State conflict (e.g. pipeline busy, duplicate name).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ValidationError:
+      description: Request body or parameters failed validation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PreconditionFailed:
+      description: '`If-Match` precondition failed.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RateLimited:
+      description: Client exceeded the rate limit.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/RateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/RateLimitReset'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Internal:
+      description: Unhandled internal error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NoContent:
+      description: Success with no response body.
+
+  schemas:
+    Id:
+      type: string
+      description: Server-generated ULID.
+      pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+      example: 01HF8Z8W9Q4J7K5N2V3X6M1T0B
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339 UTC timestamp.
+      example: '2026-04-18T09:02:39Z'
+    Problem:
+      type: object
+      description: RFC 7807 Problem Details with vendor extensions.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem type.
+        title:
+          type: string
+          description: Short human-readable summary.
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          description: URI reference identifying the specific occurrence.
+        code:
+          type: string
+          description: Canonical machine-readable code.
+          enum:
+            - AUTH_REQUIRED
+            - FORBIDDEN
+            - VALIDATION_FAILED
+            - CONFLICT
+            - NOT_FOUND
+            - RATE_LIMITED
+            - LICENSE_INVALID
+            - FEATURE_DISABLED
+            - HARDWARE_UNSUPPORTED
+            - DETECTOR_UNAVAILABLE
+            - PIPELINE_BUSY
+            - DEPENDENCY_NOT_READY
+            - PRECONDITION_FAILED
+            - INTERNAL
+        trace_id:
+          type: string
+          description: Server-assigned trace identifier.
+        errors:
+          type: array
+          description: Field-level validation errors (when `code=VALIDATION_FAILED`).
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+              rule:
+                type: string
+    Page:
+      type: object
+      description: Cursor pagination envelope.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {}
+        next_cursor:
+          type: string
+          nullable: true
+        total:
+          type: integer
+          description: Total count if cheap to compute; otherwise omitted.
+    Point:
+      type: object
+      required: [x, y]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+    Rect:
+      type: object
+      required: [x, y, w, h]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+        w: { type: number, minimum: 0, maximum: 1 }
+        h: { type: number, minimum: 0, maximum: 1 }
+    ROI:
+      description: Region of interest in normalized coordinates.
+      allOf:
+        - $ref: '#/components/schemas/Rect'
+    Oval:
+      type: object
+      required: [center, radii]
+      properties:
+        center: { $ref: '#/components/schemas/Point' }
+        radii:
+          type: object
+          required: [rx, ry]
+          properties:
+            rx: { type: number, minimum: 0, maximum: 1 }
+            ry: { type: number, minimum: 0, maximum: 1 }
+        rotation:
+          type: number
+          description: Rotation in degrees.
+          default: 0
+    Contour:
+      type: array
+      description: Polygon vertices (>=3) in normalized coordinates.
+      minItems: 3
+      items:
+        $ref: '#/components/schemas/Point'
+    HardwarePlatform:
+      type: string
+      enum: [jetson-nano, ambarella, rpi-hailo]
+    Resource:
+      type: object
+      description: Base fields present on all concrete resources.
+      required: [id, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+
+    # --- Auth / users ----------------------------------------------------
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: string, minLength: 1, maxLength: 1024, format: password }
+    TokenResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Access-token lifetime in seconds.
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    PasswordChangeRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string, format: password }
+        new_password: { type: string, format: password, minLength: 12 }
+    Role:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [name, scopes, builtin]
+          properties:
+            name: { type: string }
+            description: { type: string }
+            scopes:
+              type: array
+              items: { type: string }
+              description: RBAC scope strings, e.g. `pipelines:write`.
+            builtin:
+              type: boolean
+              description: Built-in roles cannot be modified or deleted.
+    RoleCreate:
+      type: object
+      required: [name, scopes]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        description: { type: string, maxLength: 512 }
+        scopes:
+          type: array
+          items: { type: string }
+    User:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [username, roles, locked]
+          properties:
+            username: { type: string }
+            email: { type: string, format: email, nullable: true }
+            full_name: { type: string, nullable: true }
+            roles:
+              type: array
+              items: { type: string }
+              description: Role names.
+            locked: { type: boolean }
+            last_login_at:
+              allOf:
+                - $ref: '#/components/schemas/Timestamp'
+              nullable: true
+    UserCreate:
+      type: object
+      required: [username, password, roles]
+      properties:
+        username: { type: string, minLength: 1, maxLength: 64 }
+        password: { type: string, format: password, minLength: 12 }
+        email: { type: string, format: email }
+        full_name: { type: string, maxLength: 128 }
+        roles:
+          type: array
+          items: { type: string }
+          minItems: 1
+    UserUpdate:
+      type: object
+      properties:
+        email: { type: string, format: email, nullable: true }
+        full_name: { type: string, maxLength: 128, nullable: true }
+        roles:
+          type: array
+          items: { type: string }
+    Me:
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          required: [scopes]
+          properties:
+            scopes:
+              type: array
+              description: Effective scopes granted by the user's roles.
+              items: { type: string }
+    ApiKey:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [name, prefix, scopes]
+          properties:
+            name: { type: string }
+            prefix:
+              type: string
+              description: First 8 chars of the secret, safe to display.
+            scopes:
+              type: array
+              items: { type: string }
+            expires_at:
+              allOf:
+                - $ref: '#/components/schemas/Timestamp'
+              nullable: true
+            last_used_at:
+              allOf:
+                - $ref: '#/components/schemas/Timestamp'
+              nullable: true
+    ApiKeyCreate:
+      type: object
+      required: [name, scopes]
+      properties:
+        name: { type: string, maxLength: 64 }
+        scopes:
+          type: array
+          items: { type: string }
+        expires_at:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          nullable: true
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: Full secret. Shown only once, at creation time.
+    AuditEvent:
+      type: object
+      required: [id, ts, actor, action, outcome]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        ts: { $ref: '#/components/schemas/Timestamp' }
+        actor:
+          type: object
+          required: [type]
+          properties:
+            type: { type: string, enum: [user, api_key, system] }
+            id: { type: string, nullable: true }
+            name: { type: string, nullable: true }
+        action: { type: string, description: Dotted action identifier, e.g. `pipeline.start`. }
+        target:
+          type: object
+          nullable: true
+          properties:
+            type: { type: string }
+            id: { type: string }
+        outcome: { type: string, enum: [success, failure] }
+        detail: { type: string, nullable: true }
+        request_id: { type: string, nullable: true }
+
+    # --- System ----------------------------------------------------------
+    SystemInfo:
+      type: object
+      required: [model, platform, firmware_version, serial, uptime_seconds, hostname]
+      properties:
+        model: { type: string }
+        platform: { $ref: '#/components/schemas/HardwarePlatform' }
+        firmware_version: { type: string }
+        firmware_slot: { type: string, enum: [a, b] }
+        serial: { type: string }
+        hostname: { type: string }
+        uptime_seconds: { type: integer, minimum: 0 }
+        boot_time: { $ref: '#/components/schemas/Timestamp' }
+    SystemHealth:
+      type: object
+      required: [status, subsystems]
+      properties:
+        status: { type: string, enum: [ok, degraded, failed] }
+        subsystems:
+          type: array
+          items:
+            type: object
+            required: [name, status]
+            properties:
+              name: { type: string }
+              status: { type: string, enum: [ok, degraded, failed] }
+              detail: { type: string, nullable: true }
+              updated_at: { $ref: '#/components/schemas/Timestamp' }
+    SystemTime:
+      type: object
+      required: [now, timezone, ntp_enabled]
+      properties:
+        now: { $ref: '#/components/schemas/Timestamp' }
+        timezone: { type: string, example: Europe/London }
+        ntp_enabled: { type: boolean }
+        ntp_servers:
+          type: array
+          items: { type: string }
+    SystemTimeUpdate:
+      type: object
+      properties:
+        timezone: { type: string }
+        ntp_enabled: { type: boolean }
+        ntp_servers:
+          type: array
+          items: { type: string }
+        manual_time:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          nullable: true
+    NetworkInterface:
+      type: object
+      required: [name, mac, up]
+      properties:
+        name: { type: string }
+        mac: { type: string }
+        up: { type: boolean }
+        addresses:
+          type: array
+          items: { type: string }
+        mtu: { type: integer }
+    NetworkConfig:
+      type: object
+      required: [hostname, interfaces]
+      properties:
+        hostname: { type: string }
+        dns_servers:
+          type: array
+          items: { type: string }
+        interfaces:
+          type: array
+          items: { $ref: '#/components/schemas/NetworkInterface' }
+    NetworkConfigUpdate:
+      type: object
+      properties:
+        hostname: { type: string, maxLength: 253 }
+        dns_servers:
+          type: array
+          items: { type: string }
+
+    # --- Inputs ----------------------------------------------------------
+    InputKind:
+      type: string
+      enum: [usb, csi, rtsp, file]
+    InputCapabilities:
+      type: object
+      properties:
+        resolutions:
+          type: array
+          items:
+            type: object
+            required: [width, height]
+            properties:
+              width: { type: integer }
+              height: { type: integer }
+        fps:
+          type: array
+          items: { type: number }
+        pixel_formats:
+          type: array
+          items: { type: string }
+    Input:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [name, kind, state]
+          properties:
+            name: { type: string }
+            kind: { $ref: '#/components/schemas/InputKind' }
+            uri:
+              type: string
+              description: |
+                Source URI. For `rtsp`, credentials embedded in the URI are
+                stripped and written to the secret store; responses never
+                expose the password.
+            device_path: { type: string, nullable: true }
+            capabilities: { $ref: '#/components/schemas/InputCapabilities' }
+            state:
+              type: string
+              enum: [available, unavailable, error]
+            last_error: { type: string, nullable: true }
+    InputCreate:
+      type: object
+      required: [name, kind]
+      properties:
+        name: { type: string, maxLength: 128 }
+        kind: { $ref: '#/components/schemas/InputKind' }
+        uri: { type: string }
+        device_path: { type: string }
+        credentials:
+          type: object
+          writeOnly: true
+          properties:
+            username: { type: string }
+            password: { type: string, format: password }
+    InputUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 128 }
+        uri: { type: string }
+        credentials:
+          type: object
+          writeOnly: true
+          properties:
+            username: { type: string }
+            password: { type: string, format: password }
+    InputProbe:
+      type: object
+      required: [reachable]
+      properties:
+        reachable: { type: boolean }
+        latency_ms: { type: integer, nullable: true }
+        detected:
+          allOf:
+            - $ref: '#/components/schemas/InputCapabilities'
+          nullable: true
+        detail: { type: string, nullable: true }
+
+    # --- Pipelines -------------------------------------------------------
+    PipelineState:
+      type: string
+      enum: [stopped, starting, running, stopping, errored]
+    Pipeline:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [name, enabled, state, input_id]
+          properties:
+            name: { type: string }
+            description: { type: string, nullable: true }
+            enabled: { type: boolean }
+            state: { $ref: '#/components/schemas/PipelineState' }
+            input_id: { $ref: '#/components/schemas/Id' }
+            calibration_id:
+              allOf: [ { $ref: '#/components/schemas/Id' } ]
+              nullable: true
+            detectors:
+              type: array
+              description: Enabled detector types on this pipeline.
+              items:
+                type: string
+                enum: [face, license_plate, document]
+            masks:
+              type: array
+              items: { $ref: '#/components/schemas/Id' }
+            outputs:
+              type: array
+              items: { $ref: '#/components/schemas/Id' }
+    PipelineCreate:
+      type: object
+      required: [name, input_id]
+      properties:
+        name: { type: string, maxLength: 128 }
+        description: { type: string, maxLength: 512 }
+        enabled: { type: boolean, default: false }
+        input_id: { $ref: '#/components/schemas/Id' }
+        calibration_id:
+          allOf: [ { $ref: '#/components/schemas/Id' } ]
+          nullable: true
+    PipelineUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 128 }
+        description: { type: string, nullable: true }
+        enabled: { type: boolean }
+        input_id: { $ref: '#/components/schemas/Id' }
+        calibration_id:
+          allOf: [ { $ref: '#/components/schemas/Id' } ]
+          nullable: true
+    PipelineStatus:
+      type: object
+      required: [state, fps_in, fps_out]
+      properties:
+        state: { $ref: '#/components/schemas/PipelineState' }
+        fps_in: { type: number }
+        fps_out: { type: number }
+        backpressure:
+          type: number
+          description: 0..1 utilization of the input queue.
+          minimum: 0
+          maximum: 1
+        dropped_frames: { type: integer, minimum: 0 }
+        last_error: { type: string, nullable: true }
+        started_at:
+          allOf: [ { $ref: '#/components/schemas/Timestamp' } ]
+          nullable: true
+
+    # --- Detectors -------------------------------------------------------
+    DetectorConfig:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        model_variant:
+          type: string
+          enum: [fast, balanced, accurate]
+          default: balanced
+        confidence_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.5
+        nms_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.45
+        max_detections:
+          type: integer
+          minimum: 1
+          maximum: 1024
+          default: 64
+        roi:
+          allOf:
+            - $ref: '#/components/schemas/ROI'
+          nullable: true
+        classes:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: |
+            Optional class filter. For `license_plate` this may constrain
+            regional plate variants; for `document` it selects document
+            types where supported.
+        tracking:
+          type: object
+          properties:
+            enabled: { type: boolean, default: false }
+            max_age: { type: integer, minimum: 1, default: 30 }
+            iou_threshold: { type: number, minimum: 0, maximum: 1, default: 0.3 }
+    DetectorSummary:
+      type: object
+      required: [type, enabled, available]
+      properties:
+        type:
+          type: string
+          enum: [face, license_plate, document]
+        enabled: { type: boolean }
+        available:
+          type: boolean
+          description: |
+            False when the detector is not supported on the current
+            hardware. Responses then include the platform in `detail`.
+        model_variant: { type: string, enum: [fast, balanced, accurate] }
+    DetectorModel:
+      type: object
+      required: [type, variant, platforms]
+      properties:
+        type: { type: string, enum: [face, license_plate, document] }
+        variant: { type: string, enum: [fast, balanced, accurate] }
+        version: { type: string }
+        platforms:
+          type: array
+          items: { $ref: '#/components/schemas/HardwarePlatform' }
+        input_resolution:
+          type: object
+          properties:
+            width: { type: integer }
+            height: { type: integer }
+        size_bytes: { type: integer }
+
+    # --- Calibration -----------------------------------------------------
+    Calibration:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [name, pattern, state]
+          properties:
+            name: { type: string }
+            pattern:
+              type: object
+              required: [type, cols, rows, square_size_mm]
+              properties:
+                type: { type: string, enum: [checkerboard, charuco] }
+                cols: { type: integer, minimum: 2 }
+                rows: { type: integer, minimum: 2 }
+                square_size_mm: { type: number, minimum: 0 }
+            image_count: { type: integer, minimum: 0 }
+            state:
+              type: string
+              enum: [draft, computed, failed, applied]
+            intrinsics:
+              type: object
+              nullable: true
+              properties:
+                fx: { type: number }
+                fy: { type: number }
+                cx: { type: number }
+                cy: { type: number }
+            distortion:
+              type: array
+              nullable: true
+              items: { type: number }
+              description: Distortion coefficients [k1, k2, p1, p2, k3, ...].
+            rms_error:
+              type: number
+              nullable: true
+    CalibrationCreate:
+      type: object
+      required: [name, pattern]
+      properties:
+        name: { type: string, maxLength: 128 }
+        pattern:
+          type: object
+          required: [type, cols, rows, square_size_mm]
+          properties:
+            type: { type: string, enum: [checkerboard, charuco] }
+            cols: { type: integer, minimum: 2 }
+            rows: { type: integer, minimum: 2 }
+            square_size_mm: { type: number, minimum: 0 }
+    CalibrationUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 128 }
+    CalibrationApplyRequest:
+      type: object
+      required: [pipeline_id]
+      properties:
+        pipeline_id: { $ref: '#/components/schemas/Id' }
+
+    # --- Masks -----------------------------------------------------------
+    MaskShape:
+      oneOf:
+        - type: object
+          required: [type, rect]
+          properties:
+            type: { type: string, enum: [rectangle] }
+            rect: { $ref: '#/components/schemas/Rect' }
+        - type: object
+          required: [type, oval]
+          properties:
+            type: { type: string, enum: [oval] }
+            oval: { $ref: '#/components/schemas/Oval' }
+        - type: object
+          required: [type, contour]
+          properties:
+            type: { type: string, enum: [contour] }
+            contour: { $ref: '#/components/schemas/Contour' }
+      discriminator:
+        propertyName: type
+        mapping:
+          rectangle: '#/components/schemas/Rect'
+          oval: '#/components/schemas/Oval'
+          contour: '#/components/schemas/Contour'
+    MaskCommon:
+      type: object
+      required: [target, style, strength]
+      properties:
+        target:
+          type: string
+          enum: [face, license_plate, document, all]
+        style:
+          type: string
+          enum: [blur, pixelate, solid]
+        strength:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Intensity of blur/pixelation; ignored for `solid`.
+        color:
+          type: string
+          description: Hex `#RRGGBB` for `solid` style.
+          pattern: '^#[0-9A-Fa-f]{6}$'
+          nullable: true
+        follow_detection:
+          type: boolean
+          description: |
+            When true and `target != all`, the mask tracks detection boxes
+            rather than using the static shape.
+          default: true
+    Mask:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - $ref: '#/components/schemas/MaskCommon'
+        - type: object
+          required: [shape]
+          properties:
+            shape: { $ref: '#/components/schemas/MaskShape' }
+    MaskCreate:
+      allOf:
+        - $ref: '#/components/schemas/MaskCommon'
+        - type: object
+          required: [shape]
+          properties:
+            shape: { $ref: '#/components/schemas/MaskShape' }
+    MaskUpdate:
+      type: object
+      properties:
+        target: { type: string, enum: [face, license_plate, document, all] }
+        style: { type: string, enum: [blur, pixelate, solid] }
+        strength: { type: integer, minimum: 1, maximum: 100 }
+        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+        follow_detection: { type: boolean }
+        shape: { $ref: '#/components/schemas/MaskShape' }
+
+    # --- Outputs ---------------------------------------------------------
+    OutputContent:
+      type: string
+      enum: [processed, original]
+    OutputCodec:
+      type: string
+      enum: [h264, h265, mjpeg, raw]
+    OutputKind:
+      type: string
+      enum: [rtsp, udp, hdmi, shm, file]
+    OutputRtsp:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
+        transport: { type: string, enum: [tcp, udp], default: tcp }
+        auth:
+          type: object
+          writeOnly: true
+          properties:
+            username: { type: string }
+            password: { type: string, format: password }
+    OutputUdp:
+      type: object
+      required: [host, port]
+      properties:
+        host: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        encoder: { type: string, enum: [h264, h265, mjpeg] }
+        bitrate_kbps: { type: integer, minimum: 64 }
+    OutputHdmi:
+      type: object
+      required: [port_index]
+      properties:
+        port_index: { type: integer, minimum: 0 }
+        resolution:
+          type: object
+          properties:
+            width: { type: integer }
+            height: { type: integer }
+        overlay: { type: boolean, default: true }
+    OutputShm:
+      type: object
+      required: [socket_path]
+      properties:
+        socket_path: { type: string }
+    OutputFile:
+      type: object
+      required: [path]
+      properties:
+        path: { type: string }
+        rotation:
+          type: object
+          properties:
+            interval_seconds: { type: integer, minimum: 0 }
+            max_size_mb: { type: integer, minimum: 0 }
+            keep: { type: integer, minimum: 1 }
+    OutputCommon:
+      type: object
+      required: [kind, content]
+      properties:
+        kind: { $ref: '#/components/schemas/OutputKind' }
+        content: { $ref: '#/components/schemas/OutputContent' }
+        codec:
+          allOf: [ { $ref: '#/components/schemas/OutputCodec' } ]
+          nullable: true
+        rtsp: { $ref: '#/components/schemas/OutputRtsp' }
+        udp: { $ref: '#/components/schemas/OutputUdp' }
+        hdmi: { $ref: '#/components/schemas/OutputHdmi' }
+        shm: { $ref: '#/components/schemas/OutputShm' }
+        file: { $ref: '#/components/schemas/OutputFile' }
+    Output:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - $ref: '#/components/schemas/OutputCommon'
+        - type: object
+          required: [name]
+          properties:
+            name: { type: string }
+            state: { type: string, enum: [stopped, running, errored] }
+            last_error: { type: string, nullable: true }
+    OutputCreate:
+      allOf:
+        - $ref: '#/components/schemas/OutputCommon'
+        - type: object
+          required: [name]
+          properties:
+            name: { type: string, maxLength: 128 }
+    OutputUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        content: { $ref: '#/components/schemas/OutputContent' }
+        codec: { $ref: '#/components/schemas/OutputCodec' }
+        rtsp: { $ref: '#/components/schemas/OutputRtsp' }
+        udp: { $ref: '#/components/schemas/OutputUdp' }
+        hdmi: { $ref: '#/components/schemas/OutputHdmi' }
+        shm: { $ref: '#/components/schemas/OutputShm' }
+        file: { $ref: '#/components/schemas/OutputFile' }
+
+    # --- Power -----------------------------------------------------------
+    PowerMetrics:
+      type: object
+      required: [ts, instant_watts]
+      properties:
+        ts: { $ref: '#/components/schemas/Timestamp' }
+        instant_watts: { type: number }
+        avg_1m_watts: { type: number }
+        avg_15m_watts: { type: number }
+        rails:
+          type: array
+          items:
+            type: object
+            required: [name, watts]
+            properties:
+              name: { type: string, example: soc }
+              watts: { type: number }
+        thermal:
+          type: array
+          items:
+            type: object
+            required: [zone, celsius]
+            properties:
+              zone: { type: string }
+              celsius: { type: number }
+              throttled: { type: boolean }
+    PowerSeriesPoint:
+      type: object
+      required: [ts, watts]
+      properties:
+        ts: { $ref: '#/components/schemas/Timestamp' }
+        watts: { type: number }
+    PowerPolicy:
+      type: object
+      required: [profile]
+      properties:
+        profile:
+          type: string
+          enum: [performance, balanced, powersave]
+        cpu_max_mhz: { type: integer, nullable: true }
+        gpu_max_mhz: { type: integer, nullable: true }
+        idle_detection:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            idle_seconds: { type: integer, minimum: 0 }
+        thermal:
+          type: object
+          properties:
+            throttle_celsius: { type: number }
+            shutdown_celsius: { type: number }
+    PowerSchedule:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [name, cron, profile, enabled]
+          properties:
+            name: { type: string }
+            cron: { type: string, description: Standard 5-field cron expression. }
+            profile:
+              type: string
+              enum: [performance, balanced, powersave]
+            actions:
+              type: array
+              items:
+                type: string
+                enum: [dim_hdmi, stop_pipeline, start_pipeline, reboot]
+            enabled: { type: boolean }
+    PowerScheduleCreate:
+      type: object
+      required: [name, cron, profile]
+      properties:
+        name: { type: string, maxLength: 128 }
+        cron: { type: string }
+        profile:
+          type: string
+          enum: [performance, balanced, powersave]
+        actions:
+          type: array
+          items:
+            type: string
+            enum: [dim_hdmi, stop_pipeline, start_pipeline, reboot]
+        enabled: { type: boolean, default: true }
+
+    # --- Stats -----------------------------------------------------------
+    StatsSummary:
+      type: object
+      required: [since_boot, lifetime]
+      properties:
+        since_boot: { $ref: '#/components/schemas/StatsCounters' }
+        lifetime: { $ref: '#/components/schemas/StatsCounters' }
+    StatsCounters:
+      type: object
+      required: [frames_in, frames_processed, frames_dropped]
+      properties:
+        frames_in: { type: integer, minimum: 0 }
+        frames_processed: { type: integer, minimum: 0 }
+        frames_dropped: { type: integer, minimum: 0 }
+        avg_fps: { type: number }
+        peak_fps: { type: number }
+        avg_inference_ms: { type: number }
+        detectors:
+          type: object
+          additionalProperties:
+            type: object
+            required: [detections]
+            properties:
+              detections: { type: integer, minimum: 0 }
+              unique_tracked: { type: integer, minimum: 0 }
+    StatsTimeseries:
+      type: object
+      required: [metric, step_seconds, points]
+      properties:
+        metric: { type: string }
+        step_seconds: { type: integer, minimum: 1 }
+        points:
+          type: array
+          items:
+            type: object
+            required: [ts, value]
+            properties:
+              ts: { $ref: '#/components/schemas/Timestamp' }
+              value: { type: number }
+    StatsResetRequest:
+      type: object
+      properties:
+        namespaces:
+          type: array
+          description: '`all` resets everything; otherwise selective.'
+          items:
+            type: string
+            enum: [all, pipelines, detectors, power]
+
+    # --- Updates ---------------------------------------------------------
+    UpdateStatus:
+      type: object
+      required: [current_version, channel, available_count, security_count]
+      properties:
+        current_version: { type: string }
+        channel: { type: string, enum: [stable, beta, security-only] }
+        available_count: { type: integer, minimum: 0 }
+        security_count: { type: integer, minimum: 0 }
+        last_checked_at:
+          allOf: [ { $ref: '#/components/schemas/Timestamp' } ]
+          nullable: true
+        slots:
+          type: object
+          properties:
+            active: { type: string, enum: [a, b] }
+            a_version: { type: string }
+            b_version: { type: string, nullable: true }
+    UpdateInfo:
+      type: object
+      required: [id, version, severity, requires_reboot, size_bytes]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        version: { type: string }
+        severity:
+          type: string
+          enum: [critical, high, medium, low, informational]
+        changelog: { type: string }
+        size_bytes: { type: integer }
+        requires_reboot: { type: boolean }
+        published_at: { $ref: '#/components/schemas/Timestamp' }
+    UpdateJob:
+      type: object
+      required: [id, state, progress]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        update_id: { $ref: '#/components/schemas/Id' }
+        state:
+          type: string
+          enum: [queued, downloading, verifying, installing, finalizing, success, failed, rolled_back]
+        progress: { type: number, minimum: 0, maximum: 1 }
+        started_at:
+          allOf: [ { $ref: '#/components/schemas/Timestamp' } ]
+          nullable: true
+        finished_at:
+          allOf: [ { $ref: '#/components/schemas/Timestamp' } ]
+          nullable: true
+        error: { type: string, nullable: true }
+    UpdateChannelRequest:
+      type: object
+      required: [channel]
+      properties:
+        channel: { type: string, enum: [stable, beta, security-only] }
+
+    # --- Tunnels ---------------------------------------------------------
+    Tunnel:
+      allOf:
+        - $ref: '#/components/schemas/Resource'
+        - type: object
+          required: [name, type, endpoint, enabled]
+          properties:
+            name: { type: string }
+            type: { type: string, enum: [selink] }
+            endpoint: { type: string }
+            enabled: { type: boolean }
+    TunnelCreate:
+      type: object
+      required: [name, type, endpoint]
+      properties:
+        name: { type: string, maxLength: 128 }
+        type: { type: string, enum: [selink] }
+        endpoint: { type: string }
+        enabled: { type: boolean, default: false }
+        credentials:
+          type: object
+          writeOnly: true
+          properties:
+            token: { type: string, format: password }
+    TunnelUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        endpoint: { type: string }
+        enabled: { type: boolean }
+        credentials:
+          type: object
+          writeOnly: true
+          properties:
+            token: { type: string, format: password }
+    TunnelStatus:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [disconnected, connecting, connected, error] }
+        remote_id: { type: string, nullable: true }
+        latency_ms: { type: integer, nullable: true }
+        bytes_in: { type: integer, minimum: 0 }
+        bytes_out: { type: integer, minimum: 0 }
+        connected_since:
+          allOf: [ { $ref: '#/components/schemas/Timestamp' } ]
+          nullable: true
+        last_error: { type: string, nullable: true }
+
+    # --- License ---------------------------------------------------------
+    LicenseStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, expired, invalid, unlicensed, grace]
+        plan: { type: string, nullable: true }
+        features:
+          type: array
+          items: { type: string }
+        seats: { type: integer, nullable: true }
+        expires_at:
+          allOf: [ { $ref: '#/components/schemas/Timestamp' } ]
+          nullable: true
+        hardware_binding:
+          type: object
+          nullable: true
+          properties:
+            serial: { type: string }
+            platform: { $ref: '#/components/schemas/HardwarePlatform' }
+        last_refresh_at:
+          allOf: [ { $ref: '#/components/schemas/Timestamp' } ]
+          nullable: true
+    LicenseActivateRequest:
+      type: object
+      required: [key]
+      properties:
+        key:
+          type: string
+          writeOnly: true
+          description: Hardware-bound license key string.
+    LicenseFeatures:
+      type: object
+      required: [features]
+      properties:
+        features:
+          type: array
+          items: { type: string }
+          description: Feature flags derived from the active license.
+
+    # --- Events ----------------------------------------------------------
+    Event:
+      type: object
+      required: [id, ts, channel, data]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        ts: { $ref: '#/components/schemas/Timestamp' }
+        channel:
+          type: string
+          enum:
+            - pipeline.status
+            - power.metrics
+            - detector.events
+            - updates.jobs
+            - tunnels.status
+            - system.health
+        data:
+          type: object
+          additionalProperties: true

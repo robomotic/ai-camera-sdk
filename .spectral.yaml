@@ -1,0 +1,11 @@
+extends:
+  - spectral:oas
+
+# Operations in this spec rely on `summary` (which IS required and present
+# for every operation) rather than a separate prose `description`. This is
+# consistent with the style used by Stripe, GitHub and other public API
+# references, where prose lives in docs/API-DESIGN.md instead of being
+# duplicated per operation. We therefore disable the default
+# `operation-description` warning.
+rules:
+  operation-description: off
